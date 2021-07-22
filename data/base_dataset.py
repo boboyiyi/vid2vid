@@ -24,15 +24,23 @@ class BaseDataset(data.Dataset):
             print('--------- Updating training sequence length to %d ---------' % self.n_frames_total)
 
     def init_frame_idx(self, A_paths):
+        # 训练集总共的视频数
         self.n_of_seqs = min(len(A_paths), self.opt.max_dataset_size)         # number of sequences to train
+        # 训练集视频中帧数最多的
         self.seq_len_max = max([len(A) for A in A_paths])                     # max number of frames in the training sequences
 
         self.seq_idx = 0                                                      # index for current sequence
+        # training阶段从第0帧开始
         self.frame_idx = self.opt.start_frame if not self.opt.isTrain else 0  # index for current frame in the sequence
         self.frames_count = []                                                # number of frames in each sequence
         for path in A_paths:
+            # 这里frames的意思是视频帧有多少个n_frames_G的组合
+            # 比如 1 2 3 4 5 6 7 8 9 10可以分为以下几组
+            # [1 2 3] [2 3 4] [3 4 5] [4 5 6] [5 6 7] [6 7 8] [7 8 9] [8 9 10]
+            # 正好等于10 - 3 + 1 = 8组
             self.frames_count.append(len(path) - self.opt.n_frames_G + 1)
 
+        # 算每个视频被选中的概率，视频frame数 / 总的frames数
         self.folder_prob = [count / sum(self.frames_count) for count in self.frames_count]
         self.n_frames_total = self.opt.n_frames_total if self.opt.isTrain else 1 
         self.A, self.B, self.I = None, None, None
@@ -86,7 +94,8 @@ def get_img_params(opt, size):
     w, h = size
     new_h, new_w = h, w        
     if 'resize' in opt.resize_or_crop:   # resize image to be loadSize x loadSize
-        new_h = new_w = opt.loadSize            
+        new_h = new_w = opt.loadSize
+    # edge2face中用这种模式
     elif 'scaleWidth' in opt.resize_or_crop: # scale image width to be loadSize
         new_w = opt.loadSize
         new_h = opt.loadSize * h // w
@@ -99,6 +108,7 @@ def get_img_params(opt, size):
     elif 'randomScaleHeight' in opt.resize_or_crop: # randomly scale image height to be somewhere between loadSize and fineSize
         new_h = random.randint(opt.fineSize, opt.loadSize + 1)
         new_w = new_h * w // h
+    # 使得w和h都是4的倍数
     new_w = int(round(new_w / 4)) * 4
     new_h = int(round(new_h / 4)) * 4    
 
@@ -122,8 +132,10 @@ def get_img_params(opt, size):
         #crop_x = random.randint(0, np.maximum(0, new_w - crop_w))
         #crop_y = random.randint(0, np.maximum(0, new_h - crop_h))        
     else:
+        # 使得w和h能够被32整除，作用？
         new_w, new_h = make_power_2(new_w), make_power_2(new_h)
 
+    # 50%的概率flip图像
     flip = (random.random() > 0.5) and (opt.dataset_mode != 'pose')
     return {'new_size': (new_w, new_h), 'crop_size': (crop_w, crop_h), 'crop_pos': (crop_x, crop_y), 'flip': flip}
 
@@ -134,6 +146,7 @@ def get_transform(opt, params, method=Image.BICUBIC, normalize=True, toTensor=Tr
         osize = [opt.loadSize, opt.loadSize]
         transform_list.append(transforms.Scale(osize, method))   
     else:
+        # edge2face中指定了新的size，需要将图像resize到new_size
         transform_list.append(transforms.Lambda(lambda img: __scale_image(img, params['new_size'], method)))
         
     ### crop patches from image
@@ -141,6 +154,7 @@ def get_transform(opt, params, method=Image.BICUBIC, normalize=True, toTensor=Tr
         transform_list.append(transforms.Lambda(lambda img: __crop(img, params['crop_size'], params['crop_pos'])))    
 
     ### random flip
+    # 水平flip
     if opt.isTrain and not opt.no_flip:
         transform_list.append(transforms.Lambda(lambda img: __flip(img, params['flip'])))
 
@@ -176,21 +190,35 @@ def __flip(img, flip):
 
 def get_video_params(opt, n_frames_total, cur_seq_len, index):
     tG = opt.n_frames_G
-    if opt.isTrain:        
+    if opt.isTrain:
+        # trian阶段分组最多为12
         n_frames_total = min(n_frames_total, cur_seq_len - tG + 1)
 
+        # 默认配置中n_gpus_gen = 6，batchSize = 1，所以n_gpus = 6
         n_gpus = opt.n_gpus_gen if opt.batchSize == 1 else 1       # number of generator GPUs for each batch
+        # 一张卡最多加载一个frame，n_gpus加载n_gpus个frame
         n_frames_per_load = opt.max_frames_per_gpu * n_gpus        # number of frames to load into GPUs at one time (for each batch)
+        
         n_frames_per_load = min(n_frames_total, n_frames_per_load)
+        # // 向下取整，几次可以把所有的frames取完
         n_loadings = n_frames_total // n_frames_per_load           # how many times are needed to load entire sequence into GPUs         
+        # 这里的n_frames_total含义混用，其实这里反推的是seq_len
+        # 就是我们通过n_loadings次加载的总帧数（并非frame），所以加了tG - 1
         n_frames_total = n_frames_per_load * n_loadings + tG - 1   # rounded overall number of frames to read from the sequence
         
+        # 这里的t_step指的是相邻帧之间的step，比如1 2 3 4 5 6 7 8 9 10 11 12 13
+        # 如果t_step = 2，则实际的可取帧就变为1 3 5 7 9 11 13！
+        # 总共需要n_rames_total帧，问题变为在cur_seq_len隔几帧取（t_step）可以取到n_frames_total帧的问题
+        # edge2face任务中max_t_step是1
         max_t_step = min(opt.max_t_step, (cur_seq_len-1) // (n_frames_total-1))
+        # 在[1, max_t_step]之前产生随机数，edge2face任务中t_step为1
         t_step = np.random.randint(max_t_step) + 1                    # spacing between neighboring sampled frames
+        # 这里就是第一帧的最大index确定，要预留够t_step时能取到n_frames_total帧，所以最大即如下计算
         offset_max = max(1, cur_seq_len - (n_frames_total-1)*t_step)  # maximum possible index for the first frame        
         if opt.dataset_mode == 'pose':
             start_idx = index % offset_max
         else:
+            # 在[0, offset_max - 1]之间随机选一个数作为第一帧！
             start_idx = np.random.randint(offset_max)                 # offset for the first frame to load
         if opt.debug:
             print("loading %d frames in total, first frame starting at index %d, space between neighboring frames is %d"
@@ -198,7 +226,7 @@ def get_video_params(opt, n_frames_total, cur_seq_len, index):
     else:
         n_frames_total = tG
         start_idx = index
-        t_step = 1   
+        t_step = 1
     return n_frames_total, start_idx, t_step
 
 def concat_frame(A, Ai, nF):
@@ -207,6 +235,7 @@ def concat_frame(A, Ai, nF):
     else:
         c = Ai.size()[0]
         if A.size()[0] == nF * c:
+            # edge2face任务中到不了这个条件
             A = A[c:]
         A = torch.cat([A, Ai])
     return A

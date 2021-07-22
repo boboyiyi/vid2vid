@@ -27,6 +27,7 @@ def drawEdge(im, x, y, bw=1, color=(255,255,255), draw_end_points=False):
     if x is not None and x.size:
         h, w = im.shape[0], im.shape[1]
         # edge
+        # curve上的点的(上，左，斜上)点都置为color
         for i in range(-bw, bw):
             for j in range(-bw, bw):
                 yy = np.maximum(0, np.minimum(h-1, y+i))
@@ -42,28 +43,34 @@ def drawEdge(im, x, y, bw=1, color=(255,255,255), draw_end_points=False):
                         xx = np.maximum(0, np.minimum(w-1, np.array([x[0], x[-1]])+j))
                         setColor(im, yy, xx, color)
 
-def interpPoints(x, y):    
+# x和y是三维向量，分别存着相邻三点的x坐标和y坐标
+def interpPoints(x, y):
+    # 如果相邻点的x变化最大值小于相邻点的y变化
     if abs(x[:-1] - x[1:]).max() < abs(y[:-1] - y[1:]).max():
         curve_y, curve_x = interpPoints(y, x)
         if curve_y is None:
             return None, None
-    else:        
+    else:
         with warnings.catch_warnings():
-            warnings.simplefilter("ignore")    
+            warnings.simplefilter("ignore")
             if len(x) < 3:
                 popt, _ = curve_fit(linear, x, y)
             else:
-                popt, _ = curve_fit(func, x, y)                
+                # func：ax^2 + bx + c
+                # 用x拟合y，拟合函数是func
+                popt, _ = curve_fit(func, x, y)
                 if abs(popt[0]) > 1:
                     return None, None
         if x[0] > x[-1]:
             x = list(reversed(x))
             y = list(reversed(y))
+        # 在x[0]到x[-1]之间均匀生成x[-1] - x[0]个点，即x[0], x[0] + 1, …, x[-1]
         curve_x = np.linspace(x[0], x[-1], (x[-1]-x[0]))
         if len(x) < 3:
             curve_y = linear(curve_x, *popt)
         else:
             curve_y = func(curve_x, *popt)
+    # 所以这里返回的curve_x和curve_y也是一个点集。
     return curve_x.astype(int), curve_y.astype(int)
 
 def read_keypoints(json_input, size, random_drop_prob=0, remove_face_labels=False, basic_point_only=False):

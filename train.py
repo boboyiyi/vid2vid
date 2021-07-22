@@ -16,7 +16,10 @@ def train():
     if opt.debug:
         opt.display_freq = 1
         opt.print_freq = 1    
-        opt.nThreads = 1
+        # opt.nThreads = 1
+        # 先关掉多进程
+        opt.nThreads = 0
+
 
     ### initialize dataset
     data_loader = CreateDataLoader(opt)
@@ -36,7 +39,7 @@ def train():
     ### real training starts here  
     for epoch in range(start_epoch, opt.niter + opt.niter_decay + 1):
         epoch_start_time = time.time()    
-        for idx, data in enumerate(dataset, start=epoch_iter):        
+        for idx, data in enumerate(dataset, start=epoch_iter):
             if total_steps % print_freq == 0:
                 iter_start_time = time.time()
             total_steps += opt.batchSize
